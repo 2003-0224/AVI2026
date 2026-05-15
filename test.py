@@ -44,7 +44,7 @@ class TestDataset(Dataset):
     def _load_emb(self, mod_key, sid):
         base_dir = self.modality_paths[mod_key]
         fname = f"{sid}_{self.q_type}.npz"
-        path = os.path.join(base_dir, sub, fname)
+        path = os.path.join(base_dir, fname)
         if os.path.exists(path):
             with np.load(path) as d:
                 return d["embedding"]
@@ -194,7 +194,6 @@ def main():
     # 写入最终的 submission.csv 中
     submission_df.to_csv(args.output_result_path, index=False)
     print(f"\n=====> 全维度测试完成！结果已成功保存至: {args.output_result_path}")
-    print(submission_df.head())
 
 
 if __name__ == "__main__":
