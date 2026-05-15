@@ -181,7 +181,7 @@ def main():
             )
             # 通过 id 将当前维度预测结果合并进总表
             submission_df = pd.merge(submission_df, res_df, on="id", how="left")
-            print(f"⚡ [{q_type}] 推理并合并成功。")
+            print(f"[{q_type}] 推理并合并成功。")
         except Exception as e:
             print(f"[{q_type}] 推理发生错误: {e}")
             raise e
@@ -193,7 +193,7 @@ def main():
 
     # 写入最终的 submission.csv 中
     submission_df.to_csv(args.output_result_path, index=False)
-    print(f"\n=====> 🎉 全维度测试完成！结果已成功保存至: {args.output_result_path}")
+    print(f"\n=====> 全维度测试完成！结果已成功保存至: {args.output_result_path}")
     print(submission_df.head())
 
 
