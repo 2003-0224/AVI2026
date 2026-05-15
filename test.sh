@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # 基础路径配置
-BASE_DIR="/data/home/chenqian/AVI2026"
-TEST_CSV="${BASE_DIR}/gemini_embeding/modality_fusion/submit/submission.csv"
+TEST_CSV="./template.csv"
 OUTPUT_CSV="./submission.csv"
 
 # ====================================================================
