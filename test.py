@@ -34,6 +34,58 @@ class RegressionHead(nn.Module):
         return self.net(x).view(-1)
 
 
+
+class HighDimAttentionRegressor(nn.Module):
+    def __init__(self, raw_dim, high_dim, num_heads, hidden_dims, dropout_rate, num_modalities):
+        super().__init__()
+        self.raw_dim = raw_dim
+        self.high_dim = high_dim
+        self.num_modalities = num_modalities
+        self.projection = nn.Sequential(
+            nn.Linear(raw_dim, high_dim),
+            nn.LayerNorm(high_dim),
+            nn.ReLU()
+        )
+        self.cross_modal_attention = nn.MultiheadAttention(
+            embed_dim=high_dim,
+            num_heads=num_heads,
+            dropout=0.05,
+            batch_first=True
+        )
+        self.ln1 = nn.LayerNorm(high_dim)
+        self.query_vector = nn.Parameter(torch.zeros(1, 1, high_dim))
+        self.pooling_attention = nn.MultiheadAttention(
+            embed_dim=high_dim,
+            num_heads=num_heads,
+            dropout=0.0,
+            batch_first=True
+        )
+        layers = []
+        last_dim = high_dim
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(last_dim, h_dim))
+            layers.append(nn.LayerNorm(h_dim))
+            layers.append(nn.ReLU())
+            if dropout_rate > 0:
+                layers.append(nn.Dropout(dropout_rate))
+            last_dim = h_dim
+        layers.append(nn.Linear(last_dim, 1))
+        self.regressor = nn.ModuleDict({
+            "model": nn.Sequential(*layers)
+        })
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x = x.view(batch_size, self.num_modalities, self.raw_dim)
+        x_high = self.projection(x)
+        attn_output, _ = self.cross_modal_attention(x_high, x_high, x_high)
+        fused_seq = self.ln1(x_high + attn_output)
+        query = self.query_vector.expand(batch_size, -1, -1)
+        fused_vector, _ = self.pooling_attention(query, fused_seq, fused_seq)
+        fused_vector = fused_vector.squeeze(1)
+        return self.regressor["model"](fused_vector).view(-1)
+
+
 class TestDataset(Dataset):
     def __init__(self, df, active_modalities, q_type, modality_paths):
         self.df = df
@@ -44,10 +96,11 @@ class TestDataset(Dataset):
     def _load_emb(self, mod_key, sid):
         base_dir = self.modality_paths[mod_key]
         fname = f"{sid}_{self.q_type}.npz"
-        path = os.path.join(base_dir, sub, fname)
+        path = os.path.join(base_dir, fname)
         if os.path.exists(path):
             with np.load(path) as d:
                 return d["embedding"]
+        raise FileNotFoundError(f"ID {sid} 在 {q_type} 对应模态 {mod_key} 路径下未找到特征文件")
 
     def __len__(self):
         return len(self.df)
@@ -70,37 +123,67 @@ def run_single_task_inference(model_path, test_df, q_type, modality_paths):
     state_dict = checkpoint['state_dict']
     scaler = checkpoint['scaler']
     hparams = checkpoint.get('hparams')
-
-    # 2. 自动检测模型是否包含 LayerNorm
-    use_ln = any("LayerNorm" in k or ".1.bias" in k for k in state_dict.keys())
-    print(f"模型结构自适应: {'启用' if use_ln else '禁用'} LayerNorm")
-
-    # 3. 初始化模型
-    first_key = list(state_dict.keys())[0]
-    input_dim = state_dict[first_key].shape[1]
-    model = RegressionHead(input_dim, hparams['hds'], hparams['dr'], use_ln=use_ln).to(DEVICE)
-
-    try:
-        model.load_state_dict(state_dict)
-    except RuntimeError:
-        new_state_dict = {k.replace('net.', '', 1): v for k, v in state_dict.items()}
-        model.load_state_dict(new_state_dict)
-    model.eval()
-
-    # 4. 从模型文件名解析当前模型使用的模态顺序
+    raw_mod_dim = 1536
+    # 2. 解析推理模态
     file_name = os.path.basename(model_path)
     name_parts = file_name.replace(".pth", "").split("_")
     active_mods = [m for m in name_parts if m in ["t", "a", "v"]]
-    if not active_mods:
-        # 如果从文件名无法正确解析，则使用维度推断（默认按 t, a, v 顺序）
-        num_mods = input_dim // 1536
-        active_mods = ["t", "a", "v"][:num_mods]
 
-    print(f"推理模态: {active_mods} | 维度类型: {q_type} | 输入总维度: {input_dim}")
+    # 3. 自适应分支路由结构初始化
+    if q_type == "q4":
+        batch_size = hparams.get('batch_size', 8) if hparams else 8
+        # 提取模态数
+        if 'projection.0.weight' in state_dict:
+            input_dim = state_dict['projection.0.weight'].shape[1]
+        else:
+            first_key = list(state_dict.keys())[0]
+            input_dim = state_dict[first_key].shape[1]
+
+        num_modalities = len(active_mods) if active_mods else (input_dim // raw_mod_dim)
+        if not active_mods:
+            active_mods = ["t", "a", "v"][:num_modalities]
+
+        model = HighDimAttentionRegressor(
+            raw_dim=raw_mod_dim,
+            high_dim=hparams.get('high_dim', 4096),
+            num_heads=hparams.get('num_heads'),
+            hidden_dims=hparams['hds'],
+            dropout_rate=hparams['dr'],
+            num_modalities=num_modalities
+        ).to(DEVICE)
+    else:
+        batch_size = hparams.get('batch_size', 8) if hparams else 8
+        first_key = list(state_dict.keys())[0]
+        input_dim = state_dict[first_key].shape[1]
+
+        if not active_mods:
+            num_mods = input_dim // raw_mod_dim
+            active_mods = ["t", "a", "v"][:num_mods]
+        use_ln = any("LayerNorm" in k or ".1.bias" in k for k in state_dict.keys())
+        model = RegressionHead(input_dim, hparams['hds'], hparams['dr'], use_ln=use_ln).to(DEVICE)
+
+    # 4. 加载权重并自动清洗可能错置的组件前缀
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError:
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('net.'):
+                new_state_dict[k.replace('net.', '', 1)] = v
+            elif k.startswith('model.'):
+                new_state_dict[k.replace('model.', '', 1)] = v
+            elif k.startswith('regressor.'):
+                new_state_dict[k.replace('regressor.', '', 1)] = v
+            else:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
+
+    model.eval()
+    print(f"推理模态: {active_mods} | 输入维度: {input_dim} | 采用动态 Batch Size: {batch_size}")
 
     # 5. 准备数据加载器
     dataset = TestDataset(test_df, active_mods, q_type, modality_paths)
-    loader = DataLoader(dataset, batch_size=16, shuffle=False)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     # 6. 执行推理
     ids, preds = [], []
@@ -112,11 +195,13 @@ def run_single_task_inference(model_path, test_df, q_type, modality_paths):
             preds.extend(out_orig)
 
     res_df = pd.DataFrame({"id": ids, TRAIT_MAP[q_type]: preds})
-    # 确保 id 列类型一致以防后续 merge 错位
     res_df["id"] = res_df["id"].astype(str)
     return res_df
 
 
+# ==========================================
+# 5. 主程序入口
+# ==========================================
 def main():
     parser = argparse.ArgumentParser(description="多任务串行推理脚本")
     # 基础输入输出路径
@@ -148,7 +233,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 读取测试集基础表格
+    # 读取测试集模版表格
     base_test_df = pd.read_csv(args.test_data_path)
     base_test_df["id"] = base_test_df["id"].astype(str)
 
@@ -193,8 +278,7 @@ def main():
 
     # 写入最终的 submission.csv 中
     submission_df.to_csv(args.output_result_path, index=False)
-    print(f"\n=====> 🎉 全维度测试完成！结果已成功保存至: {args.output_result_path}")
-    print(submission_df.head())
+    print(f"\n=====> 推理完成！结果已成功保存至: {args.output_result_path}")
 
 
 if __name__ == "__main__":
