@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # 基础路径配置
-BASE_DIR="/data/home/chenqian/AVI2026"
-TEST_CSV="${BASE_DIR}/gemini_embeding/modality_fusion/submit/submission.csv"
+TEST_CSV="./template.csv"
 OUTPUT_CSV="./submission.csv"
 
 # ====================================================================
@@ -33,7 +32,7 @@ Q6_A_DIR="./test_feature_q6_a"
 Q6_V_DIR="./test_feature_q6_v"
 
 # 执行多任务串行推理
-python test.py \
+python3 test.py \
     --test_data_path "$TEST_CSV" \
     --output_result_path "$OUTPUT_CSV" \
     --model_q3 "$MODEL_Q3" \
