@@ -8,7 +8,7 @@ OUTPUT_CSV="./submission.csv"
 # 配置 4 个维度的模型权重路径 (请根据实际单模态、多模态文件名进行替换)
 # ====================================================================
 MODEL_Q3="./checkpoints/model_q3_t_a.pth"
-MODEL_Q4="./checkpoints/model_q4_t_a.pth"
+MODEL_Q4="./checkpoints/model_q4_v.pth"
 MODEL_Q5="./checkpoints/model_q5_t.pth"
 MODEL_Q6="./checkpoints/model_q6_t_a_v.pth"
 
