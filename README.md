@@ -72,5 +72,5 @@ AVI/
     cd AVI-Track2
     chmod +x test.sh
     bash test.sh
-    注明：track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv
+    注明：git clone的时候可能大的pth模型权重无法下载（可扩大缓冲区），注意不要丢失文件，track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv
 ```
