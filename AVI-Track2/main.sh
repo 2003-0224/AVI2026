@@ -1,6 +1,6 @@
 mkdir -p ./output/AVI_track2 ./log
 
-nohup python -u main.py \
+nohup python3 -u main.py \
     --output_model ./output/AVI_track2/best_model.pth \
     --test_model ./output/AVI_track2/best_model.pth \
     --test_output_csv ./output/AVI_track2/submission.csv \
