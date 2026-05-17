@@ -61,6 +61,7 @@ AVI/
     ./AVI-Track2/main.sh: track2训练脚本
 # 7: 环境安装：
     进入AVI2026目录，python3 -m pip install -r requirements.txt，若无法连接github，则可以使用清华镜像源安装：python3 -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+    git clone的时候要先安装或激活git-lfs，否则大的pth模型权重无法下载（只会拉取一个几百字节的指针），此外要扩大缓冲区，拉取结束请检查模型文件是否完整，否则无法运行，注意不要丢失模型文件。
 # 8：运行启动脚本:
 ```text
     # 首先进入AVI2026目录，cd AVI2026，然后进行接下来操作：
@@ -72,5 +73,5 @@ AVI/
     cd AVI-Track2
     chmod +x test.sh
     bash test.sh
-    注明：git clone的时候可能大的pth模型权重无法下载（可扩大缓冲区），注意不要丢失文件，track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv
+    注明：track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv
 ```
