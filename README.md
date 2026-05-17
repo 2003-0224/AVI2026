@@ -73,5 +73,5 @@ AVI/
     cd AVI-Track2
     chmod +x test.sh
     bash test.sh
-    注明：track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv
+    注明：track1测试完成后，生成的测试结果在当前目录下，名称submission.csv；track2测试完成后，生成的测试结果在./AVI-Track2/output/AVI_track2/submission.csv(可能需要等待15-30秒的推理时间，具体是否完成可以看同目录下的测试日志文件)
 ```
