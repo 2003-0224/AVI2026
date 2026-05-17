@@ -256,7 +256,7 @@ def main():
         test_model(model, test_loader, device, args.test_output_csv, args.test_csv)
     else:
         model = GPT2Shared(args).to(device)
-        model.load_state_dict(torch.load(args.test_model, map_location=device))
+        model.load_state_dict(torch.load(args.test_model, map_location=device, weights_only=False))
         test_model(model, test_loader, device, args.test_output_csv, args.test_csv)
 
 if __name__ == '__main__':
