@@ -29,7 +29,7 @@
 
 # 3:AVI-Track2(track2训练测试代码目录)
 ```text
-AVI/
+AVI-Track2/
 ├── data-2026/
 │   ├── submission.csv                              # track2 提交模板
 │   ├── test_data.csv                               # track2 测试集
