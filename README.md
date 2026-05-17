@@ -48,18 +48,20 @@ AVI/
 └── test.sh                                         # 测试脚本
 ```
 
-# 3：模型权重文件 (checkpoint)
+# 4：模型权重文件 (checkpoint)
     checkpoints/: 存放track1训练完成后保存的四个维度的模型权重文件 (.pth)。脚本会自动根据权重文件加载对应的模型参数。
     ./AVI-Track2/output/AVI-Track2/:里面存放track2的模型权重文件
-# 4：数据模板
+# 5：数据模板
     template.csv: track1初始的提交模板文件，包含样本 id 列，用于引导推理流程并确定样本顺序。
     ./AVI-Track2/data-2026/submission.csv: track2初始提交模板文件
-# 5：脚本说明
+# 6：脚本说明
     test.py: track1测试脚本。支持模型结构自适应、模态组合选择。
     test.sh: track1启动脚本。该脚本配置了所有特征路径与权重路径参数，按顺序一次性执行 q3 → q4 → q5 → q6 的全流程推理，并将结果合并汇总导出为submission.csv。
     ./AVI-Track2/test.sh: track2测试脚本
     ./AVI-Track2/main.sh: track2训练脚本
-# 运行启动脚本:
+# 7: 环境安装：
+    进入AVI2026目录，python3 -m pip install -r requirements.txt，若无法连接github，则可以使用清华镜像源安装：python3 -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 8：运行启动脚本:
 ```text
     # 首先进入AVI2026目录，cd AVI2026，然后进行接下来操作：
     # track1测试：
