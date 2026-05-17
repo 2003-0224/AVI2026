@@ -61,6 +61,7 @@ AVI/
     ./AVI-Track2/main.sh: track2训练脚本
 # 运行启动脚本:
 ```text
+    # 首先进入AVI2026目录，cd AVI2026，然后进行接下来操作：
     # track1测试：
     chmod +x test.sh
     bash test.sh
