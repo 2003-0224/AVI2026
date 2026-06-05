@@ -66,6 +66,33 @@ QTYPE_QUESTION_MAP = {
           "do you think that is?"
 }
 
+PSYCHOLOGICAL_TEMPLATE_MAP = {
+    "q1": (
+        "General personality semantic anchors: stable self-description, perceived strengths and weaknesses, "
+        "work-related behavior, self-regulation, interpersonal style, responsibility, emotional stability."
+    ),
+    "q2": (
+        "General personality semantic anchors: social impression, interpersonal style, consistency between "
+        "self-view and others' view, communication style, reliability, cooperation, emotional expression."
+    ),
+    "q3": (
+        "Trait-related semantic anchors for Honesty-Humility: sincerity, fairness, modesty, avoidance of "
+        "manipulation, ethical decision-making, attitude toward money and status, integrity in professional situations."
+    ),
+    "q4": (
+        "Trait-related semantic anchors for Extraversion: social initiative, enthusiasm, assertiveness, "
+        "confidence in new groups, interaction style, sociability, energy level, comfort in social settings."
+    ),
+    "q5": (
+        "Trait-related semantic anchors for Agreeableness: patience, forgiveness, conflict handling, cooperation, "
+        "empathy, tolerance of annoyance, emotional regulation in interpersonal tension."
+    ),
+    "q6": (
+        "Trait-related semantic anchors for Conscientiousness: organization, diligence, planning, self-discipline, "
+        "reliability, orderliness, responsibility, persistence in work-related contexts."
+    )
+}
+
 GENDER_MAP = {1: "male", 2: "female"}
 EDUCATION_MAP = {
     1: "less than high school education",
@@ -82,13 +109,12 @@ processed_today = 0
 
 
 # ==============================================================================
-# 修改点：融合元信息与标准问题的文本构建函数
+# 文本模态构建函数
 # ==============================================================================
 def build_enriched_text(row, qtype):
     """
-    将 CSV 中的元信息、根据 qtype 映射的标准问题、以及转录文本（content）重构为一个高密度的文本段落
+    将 CSV 中的元信息、标准问题、转录文本和心理学语义锚点重构为人格导向文本。
     """
-    # 1. 提取元信息并尝试映射转换（若无映射则保留原值）
     raw_gender = row.get("gender")
     gender_str = GENDER_MAP.get(raw_gender, str(raw_gender)) if pd.notna(raw_gender) else "unspecified gender"
 
@@ -99,12 +125,17 @@ def build_enriched_text(row, qtype):
     work_exp = row.get("work_experience", "unknown")
     question = QTYPE_QUESTION_MAP.get(qtype, "unknown interview question").strip()
     answer = str(row.get("content", "")).strip()
-    # 4. 组装高密度 Context 文本
+    psych_template = PSYCHOLOGICAL_TEMPLATE_MAP.get(
+        qtype,
+        "Personality semantic anchors: stable behavioral tendencies, interpersonal style, self-regulation, responsibility."
+    )
+
     enriched_prompt = (
         f"User Profile: [Gender: {gender_str}, Age: {age}, "
         f"Education: {edu_str}, Work Experience: {work_exp} years]. "
-        f"Context: In a personality interview, the user was asked '{question}'. "
-        f"User's Response: '{answer}'."
+        f"Interview Question: {question} "
+        f"User's Response: {answer} "
+        f"{psych_template}"
     )
     return enriched_prompt
 
