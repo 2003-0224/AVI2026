@@ -46,10 +46,10 @@ QUESTION_CONFIGS = {
 GRID_SEARCH_PARAMS = {
     "lr": [1e-4, 5e-5, 1e-5],
     "weight_decay": [5e-2, 1e-2, 1e-3, 1e-4],
-    "dropout_rate": [0.0, 0.1, 0.3, 0.5],
+    "dropout_rate": [0.1, 0.3, 0.5],
     "hidden_dims": [
         (256,), (512,), (256, 64), (128, 32),
-        (512, 256, 64), (1024, 512, 256)
+        (512, 256, 64)
     ],
 }
 
