@@ -1,20 +1,29 @@
-# with meta-information
-import os, sys, random, copy, logging, torch
+import os
+import sys
+import time
+import copy
+import random
+import logging
 import numpy as np
 import pandas as pd
+import torch
 import torch.nn as nn
+
+from tqdm import tqdm
+from itertools import product
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
-from itertools import product, combinations
+from sklearn.preprocessing import PowerTransformer
+from torch.utils.data import Dataset, DataLoader
+
+from model import TextCenteredCrossModalAttentionRegressor
+
 
 # =============================
-# 1. 从 Shell 脚本接收动态参数
+# 1. Arguments
 # =============================
 if len(sys.argv) < 7:
-    print("Usage: python run_experiment.py <BASE_DIR> <ROOT_OUTPUT_DIR> <MODEL_SAVE_DIR> <TRAIN_CSV> <VAL_CSV> <QTYPE>")
+    print("Usage: python train.py <BASE_DIR> <ROOT_OUTPUT_DIR> <MODEL_SAVE_DIR> <TRAIN_CSV> <VAL_CSV> <QTYPE>")
     sys.exit(1)
 
 BASE_DIR = sys.argv[1]
@@ -24,7 +33,21 @@ TRAIN_CSV_PATH = sys.argv[4]
 VAL_CSV_PATH = sys.argv[5]
 CHOSEN_QTYPE = sys.argv[6]
 
-# 模态路径映射
+assert CHOSEN_QTYPE == "q6", "This script is configured for q6 / Conscientiousness."
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+BATCH_SIZE = 16
+EPOCHS = 200
+PATIENCE = 10
+SEEDS = [42, 1023, 2026]
+
+EMBED_DIM = 1536
+
+QUESTION_CONFIGS = {
+    "q6": {"label_col": "C_self", "trait": "Conscientiousness"},
+}
+
 MODALITY_MAP = {
     "t": os.path.join(BASE_DIR, f"gemini_embedding/gemini_embeddings_{CHOSEN_QTYPE}_t"),
     "a": os.path.join(BASE_DIR, f"gemini_embedding/gemini_embeddings_{CHOSEN_QTYPE}_a"),
@@ -32,46 +55,33 @@ MODALITY_MAP = {
 }
 
 MODEL_SAVE_DIR = os.path.join(BASE_MODEL_SAVE_DIR, CHOSEN_QTYPE)
-TEMPLATE_PATH = os.path.join(BASE_DIR, "submission.csv")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# 实验与网格搜索参数
-BATCH_SIZE = 16
-EPOCHS = 100
-PATIENCE = 10
-SEEDS = [42, 1023, 2026]
-
-QUESTION_CONFIGS = {
-    "q6": {"label_col": "C_self", "trait": "Conscientiousness"},
-}
 
 GRID_SEARCH_PARAMS = {
     "lr": [1e-4, 5e-5, 1e-5],
-    "weight_decay": [0, 5e-2, 1e-2, 1e-3],
+    "weight_decay": [0, 1e-3, 1e-2, 5e-2],
     "dropout_rate": [0.0, 0.1, 0.3, 0.5],
-    "hidden_dims": [
-        (128,), (256,), (512,),
-        (256, 64), (128, 32), (512, 256, 64),
-    ],
+    "hidden_dims": [(128,), (256,), (512,), (256, 64), (128, 32), (512, 256, 64)],
+    "attn_dim": [256, 512, 768],
+    "num_heads": [4, 8],
 }
 
 
 # =============================
-# 2. 工具函数
+# 2. Utilities
 # =============================
-def setup_logging(q_dir, q_type, combo_str, seed):
-    log_name = f"log_{q_type}_{combo_str}_seed_{seed}.log"
-    log_path = os.path.join(q_dir, log_name)
+def setup_logging(out_dir, seed):
+    os.makedirs(out_dir, exist_ok=True)
+    log_path = os.path.join(out_dir, f"log_q6_cross_attention_seed_{seed}.log")
 
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[logging.FileHandler(log_path), logging.StreamHandler()]
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
     )
-    return logging.getLogger(f"{q_type}_{combo_str}_{seed}")
+    return logging.getLogger(f"q6_cross_attention_{seed}")
 
 
 def set_seed(seed):
@@ -82,187 +92,269 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def make_bins(y, n_bins=5):
+    return pd.cut(y, bins=n_bins, labels=False, duplicates="drop")
+
+
 # =============================
-# 3. 数据集与模型定义
+# 3. Dataset
 # =============================
-class DynamicModalDataset(Dataset):
-    def __init__(self, df, active_modalities, q_type, label_col=None, is_test=False):
-        self.df, self.active_modalities, self.q_type = df, active_modalities, q_type
-        self.label_col, self.is_test = label_col, is_test
+class CrossModalDataset(Dataset):
+    def __init__(self, df, q_type, label_col=None, is_test=False):
+        self.df = df.reset_index(drop=True)
+        self.q_type = q_type
+        self.label_col = label_col
+        self.is_test = is_test
 
     def _load_emb(self, mod_key, sid):
         base_dir = MODALITY_MAP[mod_key]
         fname = f"{sid}_{self.q_type}.npz"
+
         for sub in ["train", "val", "test", ""]:
             path = os.path.join(base_dir, sub, fname)
             if os.path.exists(path):
-                with np.load(path) as d: return d["embedding"]
-        raise FileNotFoundError(f"Missing {mod_key} for {sid}")
+                with np.load(path) as d:
+                    return d["embedding"].astype(np.float32)
+
+        raise FileNotFoundError(f"Missing {mod_key} embedding for sample {sid}")
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        sid = str(row['id'])
-        embs = [self._load_emb(m, sid) for m in self.active_modalities]
-        feat = torch.from_numpy(np.concatenate(embs)).float()
-        label = torch.tensor(row[self.label_col] if not self.is_test and self.label_col else 0.0).float()
-        return sid, feat, label
+        sid = str(row["id"])
 
+        text = torch.from_numpy(self._load_emb("t", sid)).float()
+        audio = torch.from_numpy(self._load_emb("a", sid)).float()
+        video = torch.from_numpy(self._load_emb("v", sid)).float()
 
-class RegressionHead(nn.Module):
-    def __init__(self, in_dim, h_dims, dr):
-        super().__init__()
-        layers = []
-        for h in h_dims:
-            layers.extend([nn.Linear(in_dim, h), nn.LayerNorm(h), nn.ReLU(), nn.Dropout(dr)])
-            in_dim = h
-        layers.append(nn.Linear(in_dim, 1))
-        self.net = nn.Sequential(*layers)
+        if self.is_test or self.label_col is None:
+            label = torch.tensor(0.0).float()
+        else:
+            label = torch.tensor(row["y_trans"]).float()
 
-    def forward(self, x): return self.net(x).view(-1)
+        return sid, text, audio, video, label
 
 
 # =============================
-# 4. 训练与评估流
+# 4. Train / Eval
 # =============================
-def train_eval_flow(model, loaders, scaler, lr, wd):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+def train_eval_flow(model, loaders, transformer, lr, weight_decay):
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.MSELoss()
-    best_norm_mse, best_orig_mse, p_cnt = float("inf"), float("inf"), 0
+
+    best_trans_mse = float("inf")
+    best_orig_mse = float("inf")
     best_state = None
+    patience_counter = 0
 
     for epoch in range(EPOCHS):
         model.train()
-        for _, xb, yb in loaders['train']:
-            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+        for _, xt, xa, xv, yb in loaders["train"]:
+            xt = xt.to(DEVICE)
+            xa = xa.to(DEVICE)
+            xv = xv.to(DEVICE)
+            yb = yb.to(DEVICE)
+
             optimizer.zero_grad()
-            criterion(model(xb), yb).backward()
+            pred = model(xt, xa, xv)
+            loss = criterion(pred, yb)
+            loss.backward()
             optimizer.step()
 
         model.eval()
-        p_list, l_list = [], []
+        preds, labels = [], []
+
         with torch.no_grad():
-            for _, xb, yb in loaders['val']:
-                p_list.append(model(xb.to(DEVICE)).cpu().numpy())
-                l_list.append(yb.numpy())
+            for _, xt, xa, xv, yb in loaders["val"]:
+                xt = xt.to(DEVICE)
+                xa = xa.to(DEVICE)
+                xv = xv.to(DEVICE)
 
-        pn, ln = np.concatenate(p_list), np.concatenate(l_list)
-        norm_mse = mean_squared_error(ln, pn)
+                pred = model(xt, xa, xv).cpu().numpy()
+                preds.append(pred)
+                labels.append(yb.numpy())
 
-        if norm_mse < best_norm_mse:
-            po = scaler.inverse_transform(pn.reshape(-1, 1))
-            lo = scaler.inverse_transform(ln.reshape(-1, 1))
-            best_norm_mse, best_orig_mse, p_cnt = norm_mse, mean_squared_error(lo, po), 0
+        pred_trans = np.concatenate(preds)
+        label_trans = np.concatenate(labels)
+
+        trans_mse = mean_squared_error(label_trans, pred_trans)
+
+        if trans_mse < best_trans_mse:
+            pred_orig = transformer.inverse_transform(pred_trans.reshape(-1, 1)).reshape(-1)
+            label_orig = transformer.inverse_transform(label_trans.reshape(-1, 1)).reshape(-1)
+
+            best_trans_mse = trans_mse
+            best_orig_mse = mean_squared_error(label_orig, pred_orig)
             best_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
         else:
-            p_cnt += 1
-        if p_cnt >= PATIENCE: break
-    return best_norm_mse, best_orig_mse, best_state
+            patience_counter += 1
+
+        if patience_counter >= PATIENCE:
+            break
+
+    return best_trans_mse, best_orig_mse, best_state
+
+
+def build_model(hparams):
+    return TextCenteredCrossModalAttentionRegressor(
+        embed_dim=EMBED_DIM,
+        attn_dim=hparams["attn_dim"],
+        num_heads=hparams["num_heads"],
+        hidden_dims=hparams["hidden_dims"],
+        dropout_rate=hparams["dropout_rate"],
+    ).to(DEVICE)
 
 
 # =============================
-# 5. 主程序
+# 5. Main
 # =============================
 def main():
-    template_df = pd.read_csv(TEMPLATE_PATH)
     config = QUESTION_CONFIGS[CHOSEN_QTYPE]
 
-    # 读取独立的 train 和 val，合并并重新构建索引避免重复
     train_data = pd.read_csv(TRAIN_CSV_PATH)
     val_data = pd.read_csv(VAL_CSV_PATH)
     all_data = pd.concat([train_data, val_data], ignore_index=True)
 
-    # 统一标签标准化
-    scaler = StandardScaler()
-    all_data['y_norm'] = scaler.fit_transform(all_data[[config['label_col']]])
+    label_col = config["label_col"]
 
-    # 将连续值标签切分为5个等间距桶，提供给 StratifiedKFold 做分层划分依据
-    all_data['bins'] = pd.cut(all_data[config['label_col']], bins=5, labels=False)
+    # Yeo-Johnson transformation on merged train+val labels.
+    # During CV, the transformer is fitted only on each fold's training labels.
+    all_data["bins"] = make_bins(all_data[label_col], n_bins=5)
 
-    keys = list(MODALITY_MAP.keys())
-    combos = [list(c) for r in range(1, len(keys) + 1) for c in combinations(keys, r)]
+    param_grid = list(product(
+        GRID_SEARCH_PARAMS["lr"],
+        GRID_SEARCH_PARAMS["weight_decay"],
+        GRID_SEARCH_PARAMS["dropout_rate"],
+        GRID_SEARCH_PARAMS["hidden_dims"],
+        GRID_SEARCH_PARAMS["attn_dim"],
+        GRID_SEARCH_PARAMS["num_heads"],
+    ))
 
     for seed in SEEDS:
         set_seed(seed)
 
-        q_dir_name = f"{CHOSEN_QTYPE}_{config['trait']}_seed_{seed}"
-        q_dir = os.path.join(ROOT_OUTPUT_DIR, q_dir_name)
-        os.makedirs(q_dir, exist_ok=True)
+        out_dir = os.path.join(ROOT_OUTPUT_DIR, f"q6_{config['trait']}_cross_attention_seed_{seed}")
+        model_dir = os.path.join(MODEL_SAVE_DIR, f"seed_{seed}")
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
 
-        seed_model_save_dir = os.path.join(MODEL_SAVE_DIR, f"seed_{seed}")
-        os.makedirs(seed_model_save_dir, exist_ok=True)
+        logger = setup_logging(out_dir, seed)
+        logger.info(f"Start q6 Cross-Modal Attention training | Seed={seed}")
 
-        for combo in combos:
-            combo_str = "_".join(combo)
-            logger = setup_logging(q_dir, CHOSEN_QTYPE, combo_str, seed)
-            logger.info(f"Dimension: {CHOSEN_QTYPE} | Seed: {seed} | Modality: {combo_str} | Start")
+        # =============================
+        # Grid search with 5-fold CV
+        # =============================
+        best_cv_mse = float("inf")
+        best_hparams = None
 
-            input_dim = 1536 * len(combo)
-            param_grid = list(product(GRID_SEARCH_PARAMS["lr"], GRID_SEARCH_PARAMS["weight_decay"],
-                                      GRID_SEARCH_PARAMS["dropout_rate"], GRID_SEARCH_PARAMS["hidden_dims"]))
+        for lr, wd, dr, hds, attn_dim, num_heads in tqdm(param_grid, desc=f"Grid Search Seed {seed}"):
+            if attn_dim % num_heads != 0:
+                continue
 
-            best_mse, best_hparams = float("inf"), None
+            hparams = {
+                "lr": lr,
+                "weight_decay": wd,
+                "dropout_rate": dr,
+                "hidden_dims": hds,
+                "attn_dim": attn_dim,
+                "num_heads": num_heads,
+            }
 
-            # --- 网格搜索阶段：使用分桶后的合并数据进行 5 折交叉验证 ---
-            for lr, wd, dr, hds in tqdm(param_grid, desc=f"Grid {combo_str} Seed {seed}"):
-                skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-                cv_mses = []
-                for t_idx, v_idx in skf.split(all_data, all_data['bins']):
-                    loaders = {
-                        'train': DataLoader(DynamicModalDataset(all_data.iloc[t_idx], combo, CHOSEN_QTYPE, 'y_norm'),
-                                            batch_size=BATCH_SIZE, shuffle=True),
-                        'val': DataLoader(DynamicModalDataset(all_data.iloc[v_idx], combo, CHOSEN_QTYPE, 'y_norm'),
-                                          batch_size=BATCH_SIZE)
-                    }
-                    model = RegressionHead(input_dim, hds, dr).to(DEVICE)
-                    _, f_orig_mse, _ = train_eval_flow(model, loaders, scaler, lr, wd)
-                    cv_mses.append(f_orig_mse)
-
-                avg_mse = np.mean(cv_mses)
-                if avg_mse < best_mse:
-                    best_mse, best_hparams = avg_mse, {"lr": lr, "wd": wd, "dr": dr, "hds": hds}
-
-            logger.info(f"Best Average CV MSE: {best_mse:.6f} | Params: {best_hparams}")
-
-            # --- 5折选最优折逻辑 ---
             skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-            test_loader = DataLoader(DynamicModalDataset(template_df, combo, CHOSEN_QTYPE, is_test=True),
-                                     batch_size=BATCH_SIZE)
+            fold_mses = []
 
-            best_fold_mse = float("inf")
-            best_fold_state = None
-            best_fold_idx = -1
+            for fold, (tr_idx, va_idx) in enumerate(skf.split(all_data, all_data["bins"])):
+                fold_train = all_data.iloc[tr_idx].copy()
+                fold_val = all_data.iloc[va_idx].copy()
 
-            for fold, (t_idx, v_idx) in enumerate(skf.split(all_data, all_data['bins'])):
+                transformer = PowerTransformer(method="yeo-johnson", standardize=True)
+                fold_train["y_trans"] = transformer.fit_transform(fold_train[[label_col]]).reshape(-1)
+                fold_val["y_trans"] = transformer.transform(fold_val[[label_col]]).reshape(-1)
+
                 loaders = {
-                    'train': DataLoader(DynamicModalDataset(all_data.iloc[t_idx], combo, CHOSEN_QTYPE, 'y_norm'),
-                                        batch_size=BATCH_SIZE, shuffle=True),
-                    'val': DataLoader(DynamicModalDataset(all_data.iloc[v_idx], combo, CHOSEN_QTYPE, 'y_norm'),
-                                      batch_size=BATCH_SIZE)
+                    "train": DataLoader(
+                        CrossModalDataset(fold_train, CHOSEN_QTYPE, label_col),
+                        batch_size=BATCH_SIZE,
+                        shuffle=True,
+                    ),
+                    "val": DataLoader(
+                        CrossModalDataset(fold_val, CHOSEN_QTYPE, label_col),
+                        batch_size=BATCH_SIZE,
+                        shuffle=False,
+                    ),
                 }
-                model = RegressionHead(input_dim, best_hparams["hds"], best_hparams["dr"]).to(DEVICE)
-                _, f_orig_mse, b_state = train_eval_flow(model, loaders, scaler, best_hparams["lr"], best_hparams["wd"])
 
-                if f_orig_mse < best_fold_mse:
-                    best_fold_mse = f_orig_mse
-                    best_fold_state = copy.deepcopy(b_state)
-                    best_fold_idx = fold
+                model = build_model(hparams)
+                _, orig_mse, _ = train_eval_flow(model, loaders, transformer, lr, wd)
+                fold_mses.append(orig_mse)
 
-            logger.info(f"Best Fold: Fold {best_fold_idx} | Val MSE: {best_fold_mse:.6f}")
-            best_hparams["batch_size"] = BATCH_SIZE
+            avg_mse = float(np.mean(fold_mses))
 
-            # 保存单最优折权重
-            model_save_path = os.path.join(seed_model_save_dir, f"model_{combo_str}.pth")
+            if avg_mse < best_cv_mse:
+                best_cv_mse = avg_mse
+                best_hparams = hparams
+
+        logger.info(f"Best CV MSE: {best_cv_mse:.6f}")
+        logger.info(f"Best Params: {best_hparams}")
+
+        # =============================
+        # Train and save all 5 folds for ensemble
+        # =============================
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+        fold_states = []
+        fold_mses = []
+
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(all_data, all_data["bins"])):
+            fold_train = all_data.iloc[tr_idx].copy()
+            fold_val = all_data.iloc[va_idx].copy()
+
+            transformer = PowerTransformer(method="yeo-johnson", standardize=True)
+            fold_train["y_trans"] = transformer.fit_transform(fold_train[[label_col]]).reshape(-1)
+            fold_val["y_trans"] = transformer.transform(fold_val[[label_col]]).reshape(-1)
+
+            loaders = {
+                "train": DataLoader(
+                    CrossModalDataset(fold_train, CHOSEN_QTYPE, label_col),
+                    batch_size=BATCH_SIZE,
+                    shuffle=True,
+                ),
+                "val": DataLoader(
+                    CrossModalDataset(fold_val, CHOSEN_QTYPE, label_col),
+                    batch_size=BATCH_SIZE,
+                    shuffle=False,
+                ),
+            }
+
+            model = build_model(best_hparams)
+            _, orig_mse, best_state = train_eval_flow(
+                model,
+                loaders,
+                transformer,
+                best_hparams["lr"],
+                best_hparams["weight_decay"],
+            )
+
+            fold_mses.append(orig_mse)
+            fold_states.append(best_state)
+
+            save_path = os.path.join(model_dir, f"q6_cross_attention_fold_{fold}.pth")
             torch.save({
-                'state_dict': best_fold_state,
-                'scaler': scaler,
-                'config': config,
-                'hparams': best_hparams,
-            }, model_save_path)
+                "state_dict": best_state,
+                "transformer": transformer,
+                "config": config,
+                "hparams": best_hparams,
+                "fold": fold,
+                "fold_mse": orig_mse,
+                "model_type": "text_centered_cross_modal_attention",
+            }, save_path)
 
-            print("Model saved in path: %s" % model_save_path)
+            logger.info(f"Saved Fold {fold} | MSE={orig_mse:.6f} | Path={save_path}")
+
+        logger.info(f"Final 5-Fold Average MSE: {np.mean(fold_mses):.6f}")
+        logger.info(f"Fold MSEs: {fold_mses}")
 
 
 if __name__ == "__main__":
