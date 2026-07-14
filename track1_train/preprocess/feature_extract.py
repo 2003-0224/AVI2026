@@ -51,7 +51,7 @@ DATASET_CONFIGS = [
 ]
 
 # ==============================================================================
-# 新增：问题类型（qtype）到具体标准问题的映射字典
+# 问题类型（qtype）到具体标准问题的映射字典
 # ==============================================================================
 QTYPE_QUESTION_MAP = {
     "q1": "What would you consider among your greatest strengths and weaknesses as an employee?",
